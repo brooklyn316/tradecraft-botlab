@@ -7,6 +7,7 @@
 
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { createClient } from "@supabase/supabase-js";
+import { computeBotStats, type BotStats } from "@/lib/botStats";
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -270,7 +271,8 @@ function MarketClock() {
 
 // ── Main dashboard ────────────────────────────────────────────
 
-type Tab = "leaderboard" | "groups" | "equity" | "trades" | "superbot";
+type Tab = "leaderboard" | "compare" | "groups" | "equity" | "trades" | "superbot";
+type CompareSortKey = "sharpe" | "totalReturn" | "winDayRate";
 
 export default function DashboardPage() {
   const supabase = useMemo(() => createClient(
@@ -287,6 +289,7 @@ export default function DashboardPage() {
   const [selectedBot, setSelectedBot] = useState<string | null>(null);
   const [groupFilter, setGroupFilter] = useState<string>("ALL");
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
+  const [compareSortKey, setCompareSortKey] = useState<CompareSortKey>("sharpe");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -329,6 +332,20 @@ export default function DashboardPage() {
   const filteredLeaderboard = groupFilter === "ALL"
     ? leaderboard
     : leaderboard.filter(e => e.bot.group_id === groupFilter);
+
+  // Compare tab — risk-adjusted stats per bot, computed client-side over the
+  // same snapshots already fetched for the leaderboard (no extra query).
+  // All three sortable metrics are "higher is better," so a single descending
+  // sort works for all of them; bots without enough data (stats = null) sort
+  // to the bottom rather than throwing off the ranking.
+  const compareList = bots
+    .map(bot => ({ bot, stats: computeBotStats(snapshots.filter(s => s.bot_id === bot.id)) }))
+    .sort((a, b) => (b.stats[compareSortKey] ?? -Infinity) - (a.stats[compareSortKey] ?? -Infinity))
+    .map((e, i) => ({ ...e, rank: i + 1 }));
+
+  const filteredCompareList = groupFilter === "ALL"
+    ? compareList
+    : compareList.filter(e => e.bot.group_id === groupFilter);
 
   // Group stats
   const groups = ["A","B","C","D","E","F","S"];
@@ -392,7 +409,7 @@ export default function DashboardPage() {
 
       {/* Main tabs */}
       <div className="px-6 pt-4 flex gap-2 mb-4">
-        {(["leaderboard","groups","equity","trades","superbot"] as Tab[]).map(t => (
+        {(["leaderboard","compare","groups","equity","trades","superbot"] as Tab[]).map(t => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -473,6 +490,68 @@ export default function DashboardPage() {
                     </tr>
                   );
                 })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* ── COMPARE ── */}
+        {tab === "compare" && (
+          <div className="bg-gray-900 rounded-xl border border-gray-800 overflow-x-auto">
+            <div className="px-4 py-3 border-b border-gray-800">
+              <h2 className="font-bold text-sm">Compare — risk-adjusted performance</h2>
+              <p className="text-gray-600 text-xs mt-0.5">
+                Sharpe-style ratio is annualized and blank ("—") for bots with fewer than 5 days of history — too little data for a meaningful number.
+              </p>
+            </div>
+            <table className="w-full text-sm min-w-[820px]">
+              <thead>
+                <tr className="border-b border-gray-800 text-gray-500 text-xs uppercase tracking-wide">
+                  <th className="text-left px-3 py-3 w-8">#</th>
+                  <th className="text-left px-3 py-3">Bot</th>
+                  {([
+                    ["totalReturn", "Total Return"],
+                    ["sharpe", "Sharpe"],
+                    ["winDayRate", "Win Days"],
+                  ] as [CompareSortKey, string][]).map(([key, label]) => (
+                    <th key={key} className="text-right px-3 py-3">
+                      <button
+                        onClick={() => setCompareSortKey(key)}
+                        className={`uppercase tracking-wide ${compareSortKey === key ? "text-white" : "text-gray-500 hover:text-gray-300"}`}
+                      >
+                        {label}{compareSortKey === key ? " ▾" : ""}
+                      </button>
+                    </th>
+                  ))}
+                  <th className="text-right px-3 py-3">Volatility</th>
+                  <th className="text-right px-3 py-3">Days</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredCompareList.map(({ bot, stats, rank }) => (
+                  <tr key={bot.id} className="border-b border-gray-800/50 hover:bg-gray-800/40">
+                    <td className="px-3 py-2.5 text-gray-500 text-xs">{rank}</td>
+                    <td className="px-3 py-2.5">
+                      <div className="flex items-center gap-2">
+                        <GroupBadge groupId={bot.group_id} />
+                        <p className="font-semibold text-sm">{bot.code} <span className="text-gray-400 font-normal">— {bot.name}</span></p>
+                      </div>
+                    </td>
+                    <td className={`px-3 py-2.5 text-right font-mono text-sm font-bold ${pnlColour(stats.totalReturn)}`}>
+                      {stats.totalReturn >= 0 ? "+" : ""}{fmt(stats.totalReturn)}%
+                    </td>
+                    <td className={`px-3 py-2.5 text-right font-mono text-sm ${stats.sharpe == null ? "text-gray-700" : pnlColour(stats.sharpe)}`}>
+                      {stats.sharpe == null ? "—" : fmt(stats.sharpe)}
+                    </td>
+                    <td className="px-3 py-2.5 text-right font-mono text-xs text-gray-400">
+                      {stats.winDayRate == null ? "—" : `${fmt(stats.winDayRate, 0)}%`}
+                    </td>
+                    <td className="px-3 py-2.5 text-right font-mono text-xs text-gray-500">
+                      {stats.volatility == null ? "—" : `${fmt(stats.volatility)}%`}
+                    </td>
+                    <td className="px-3 py-2.5 text-right text-gray-600 text-xs">{stats.days}</td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>

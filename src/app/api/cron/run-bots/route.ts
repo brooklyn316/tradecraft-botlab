@@ -227,8 +227,10 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  if (!isMarketOpen()) {
-    return NextResponse.json({ skipped: true, reason: "Market closed" });
+  const marketOpen = isMarketOpen();
+  console.log(`[run-bots] market open: ${marketOpen}, utc: ${new Date().toISOString()}`);
+  if (!marketOpen) {
+    return NextResponse.json({ skipped: true, reason: "Market closed", utc: new Date().toISOString() });
   }
 
   const supabase    = getBotLabClient();
