@@ -14,6 +14,7 @@ import {
   loadBotContext,
   writeDailySnapshot,
   refreshPrices,
+  refreshDailyHistory,
   isMarketOpen,
 } from "@/lib/botEngine";
 import { SupabaseClient } from "@supabase/supabase-js";
@@ -259,6 +260,17 @@ export async function GET(req: Request) {
     await refreshPrices(allSymbols);
   } catch (err) {
     console.error("Price refresh failed:", err);
+  }
+
+  // Daily bars only need refreshing once the day's bar is final, not on every
+  // 30-min tick — reuses the same isCloseTime window writeDailySnapshot() uses.
+  // Idempotent on (symbol, date), so firing on 2 consecutive ticks is harmless.
+  if (isCloseTime) {
+    try {
+      await refreshDailyHistory(allSymbols);
+    } catch (err) {
+      console.error("Daily history refresh failed:", err);
+    }
   }
 
   // Run each bot

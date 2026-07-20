@@ -143,6 +143,28 @@ export async function refreshPrices(symbols: string[]): Promise<void> {
   }
 }
 
+/**
+ * Requests daily bars (interval: "1day") so the stock-prices edge function
+ * upserts into stock_price_history — the table loadHistory() actually reads
+ * for every bot's ctx.history. Daily bars only need refreshing once a day
+ * (call this gated on isNearMarketClose(), not on every 30-min tick).
+ */
+export async function refreshDailyHistory(symbols: string[]): Promise<void> {
+  const url = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/stock-prices`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}`,
+    },
+    body: JSON.stringify({ symbols, interval: "1day" }),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`stock-prices (1day) edge function error: ${res.status} ${body}`);
+  }
+}
+
 // ── Portfolio helpers ─────────────────────────────────────────
 
 /** Total portfolio value (holdings at current prices + cash) */
