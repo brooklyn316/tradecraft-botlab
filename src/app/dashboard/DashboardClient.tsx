@@ -60,6 +60,7 @@ const GROUP_COLOURS: Record<string, string> = {
   D: "#8b5cf6",
   E: "#ef4444",
   F: "#06b6d4",
+  G: "#ec4899",
   S: "#f97316",
 };
 
@@ -70,6 +71,7 @@ const GROUP_LABELS: Record<string, string> = {
   D: "Adaptive",
   E: "Smart Money",
   F: "Thematic",
+  G: "Creator-Inspired",
   S: "Super Bot",
 };
 
@@ -348,7 +350,7 @@ export default function DashboardPage() {
     : compareList.filter(e => e.bot.group_id === groupFilter);
 
   // Group stats
-  const groups = ["A","B","C","D","E","F","S"];
+  const groups = ["A","B","C","D","E","F","G","S"];
   const groupStats = groups.map(g => {
     const entries = leaderboard.filter(e => e.bot.group_id === g && e.latest);
     const count   = entries.length;
@@ -385,7 +387,7 @@ export default function DashboardPage() {
       <MarketClock />
 
       {/* Group summary strip */}
-      <div className="px-6 py-3 border-b border-gray-800 grid grid-cols-7 gap-2">
+      <div className="px-6 py-3 border-b border-gray-800 grid grid-cols-8 gap-2">
         {groupStats.map(({ g, count, avg, best }) => (
           <button
             key={g}

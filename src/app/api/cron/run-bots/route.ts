@@ -127,6 +127,8 @@ import { runD1, runD2, runD3, runD4 } from "@/bots/groupD";
 import { runE1, runE2, runE3, runE4, runE5, runE6 } from "@/bots/groupE";
 // Group F
 import { F_UNIVERSE, runF1, runF2, runF3, runF4, runF5, runF6, runF7, runF8, runF9, runF10, runF11, runF12, runF13, runF14, runF15 } from "@/bots/groupF";
+// Group G
+import { runG1, runG2, runG3, runG4 } from "@/bots/groupG";
 // Super Bot
 import { runS1 } from "@/bots/superBot";
 
@@ -207,6 +209,12 @@ const BOT_RUNNERS: Record<string, {
   F13: { symbols: F_UNIVERSE, run: runF13 },
   F14: { symbols: F_UNIVERSE, run: runF14 },
   F15: { symbols: SECTOR_ETFS, run: runF15 },
+
+  // Group G
+  G1:  { symbols: GROUP_A_ALL_SYMBOLS, run: runG1 },
+  G2:  { symbols: GROUP_A_ALL_SYMBOLS, run: runG2 },
+  G3:  { symbols: GROUP_A_ALL_SYMBOLS, run: runG3 },
+  G4:  { symbols: GROUP_A_ALL_SYMBOLS, run: runG4 },
 
   // Super Bot
   S1:  { symbols: ALL_SYMBOLS, run: runS1 },
