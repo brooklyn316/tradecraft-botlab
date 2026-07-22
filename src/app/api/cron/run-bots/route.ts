@@ -147,16 +147,44 @@ async function isNewsStale(supabase: SupabaseClient): Promise<boolean> {
   return ageHours > 20;
 }
 
-// GDELT's free Doc 2.0 API — no key required, but self-throttles to roughly
-// one request per 5s (confirmed live: faster than that returns a rate-limit
-// message instead of data). Fetched sequentially with a deliberate delay
-// between symbols rather than in parallel, and gated to once per ~20h by
-// isNewsStale() above so this slow path only runs on one tick a day.
+// Bounds any promise to a hard wall-clock budget. Used so a slow/rate-limited
+// external data source can never block the actual bot-trading loop below —
+// confirmed live that without this, GDELT alone was enough to blow through
+// Vercel's 120s function timeout and kill the ENTIRE run-bots invocation
+// before a single bot got to trade, on every tick since this morning.
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T | undefined> {
+  return Promise.race([
+    promise,
+    new Promise<undefined>(resolve => setTimeout(() => {
+      console.error(`[run-bots] ${label} exceeded ${ms}ms budget — abandoning for this tick`);
+      resolve(undefined);
+    }, ms)),
+  ]);
+}
+
+async function fetchWithTimeout(url: string, opts: RequestInit, ms: number): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  try {
+    return await fetch(url, { ...opts, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// GDELT's free Doc 2.0 API — no key required, but in practice can rate-limit
+// or hang far more aggressively than its own "~1 req/5s" guidance suggests
+// (confirmed live: 429s and multi-second connect timeouts even at 8s spacing).
+// Each request gets its own short timeout so one bad connection can't stall
+// the whole loop, and the whole function is additionally wrapped in a hard
+// overall budget by maybeRefreshExternalData() below — this inner loop just
+// needs to degrade gracefully (fetch what it can, skip the rest) rather than
+// guarantee completion.
 async function fetchNewsSentiment(supabase: SupabaseClient) {
   for (const [symbol, companyName] of Object.entries(NEWS_SYMBOL_NAMES)) {
     try {
       const url = `https://api.gdeltproject.org/api/v2/doc/doc?query=${encodeURIComponent(`"${companyName}"`)}&mode=timelinetone&timespan=1d&format=json`;
-      const r = await fetch(url, { headers: { "User-Agent": "TradecraftBotLab research@botlab.dev" } });
+      const r = await fetchWithTimeout(url, { headers: { "User-Agent": "TradecraftBotLab research@botlab.dev" } }, 6000);
       if (r.ok) {
         const data = await r.json();
         const points: { date: string; value: number }[] = data?.timeline?.[0]?.data ?? [];
@@ -171,7 +199,7 @@ async function fetchNewsSentiment(supabase: SupabaseClient) {
         );
       }
     } catch { /* non-fatal, continue to next symbol */ }
-    await sleep(8000);
+    await sleep(3000);
   }
 }
 
@@ -179,10 +207,11 @@ async function maybeRefreshExternalData(supabase: SupabaseClient): Promise<strin
   const stale     = await isExternalDataStale(supabase);
   const newsStale = await isNewsStale(supabase);
   const tasks: Promise<unknown>[] = [];
-  if (stale)     tasks.push(fetchCapitolTrades(supabase), fetchBerkshire(supabase), fetchArkHoldings(supabase));
-  if (newsStale) tasks.push(fetchNewsSentiment(supabase));
+  if (stale)     tasks.push(withTimeout(Promise.allSettled([fetchCapitolTrades(supabase), fetchBerkshire(supabase), fetchArkHoldings(supabase)]), 20_000, "institutional data refresh"));
+  if (newsStale) tasks.push(withTimeout(fetchNewsSentiment(supabase), 30_000, "news sentiment refresh"));
   if (tasks.length === 0) return "external data fresh — skipped";
-  // Run fetches in parallel, all non-fatal
+  // Every task above is already individually time-boxed, so this just waits
+  // for whichever finishes last — never longer than the largest budget above.
   await Promise.allSettled(tasks);
   return `external data refreshed (institutional=${stale}, news=${newsStale})`;
 }
