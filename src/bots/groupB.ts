@@ -4,7 +4,7 @@
 // All trade US-listed ETFs only.
 // ============================================================
 
-import { BotContext, executeTrade, totalPortfolioValue, holdingsValue } from "@/lib/botEngine";
+import { BotContext, executeTrade, totalPortfolioValue, holdingsValue, maxPositionValue } from "@/lib/botEngine";
 import { PriceHistory } from "@/lib/botEngine";
 
 export const B_SYMBOLS  = ["SPY", "QQQ", "ENZL", "EWA", "EZU", "EWJ", "FXI"];
@@ -84,8 +84,19 @@ export async function runB2(ctx: BotContext): Promise<string[]> {
       logs.push("B2: already in cash, staying out");
     }
   } else if (spyChangePct >= 0) {
-    // Positive day — re-enter or top up SPY with all available cash
-    if (portfolio.cash_balance > 5) {
+    // Positive day — re-enter or top up SPY with all available cash, but only
+    // if there's real headroom under the shared 40%-max-position cap. Without
+    // this check, B2's own "not fully invested" test only looked at cash
+    // (> $5), so once SPY sat at its capped ~40% share of the portfolio it
+    // kept re-attempting a full-cash buy on every tick SPY stayed non-negative
+    // — each one silently rejected by the engine's cap, but still a pointless
+    // repeated no-op forever.
+    const spyRowPrice = spyRow?.price;
+    const currentSpyValue = (holdingSpy?.shares ?? 0) * (spyRowPrice ?? holdingSpy?.avg_cost ?? 0);
+    const portfolioTotal = totalPortfolioValue(holdings, prices, portfolio.cash_balance);
+    const headroom = maxPositionValue(portfolioTotal) - currentSpyValue;
+
+    if (portfolio.cash_balance > 5 && headroom > 1) {
       const result = await executeTrade({ ctx, symbol: "SPY", action: "buy", amount: portfolio.cash_balance * 0.99, reason: `SPY positive (${spyChangePct.toFixed(2)}%) — re-entering` });
       logs.push(`B2 re-enter: ${result.message}`);
     } else {
