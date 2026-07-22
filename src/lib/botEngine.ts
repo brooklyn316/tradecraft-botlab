@@ -29,6 +29,7 @@ export interface BotHolding {
   shares: number;
   avg_cost: number;
   updated_at: string;
+  profit_tier: number;
 }
 
 export interface StockPrice {
@@ -320,7 +321,7 @@ export async function executeTrade(params: TradeParams): Promise<TradeResult> {
     portfolio.last_traded_at = new Date().toISOString();
     const existing = holdings.find(h => h.symbol === symbol);
     if (existing) { existing.shares = newShares; existing.avg_cost = newAvgCost; }
-    else holdings.push({ bot_id: bot.id, symbol, shares: newShares, avg_cost: newAvgCost, updated_at: new Date().toISOString() });
+    else holdings.push({ bot_id: bot.id, symbol, shares: newShares, avg_cost: newAvgCost, updated_at: new Date().toISOString(), profit_tier: 0 });
 
   } else {
     const newCash   = portfolio.cash_balance + totalCost;

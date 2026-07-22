@@ -19,6 +19,11 @@ import {
 } from "@/lib/botEngine";
 import { SupabaseClient } from "@supabase/supabase-js";
 
+// News sentiment refresh (fetchNewsSentiment below) makes ~10 sequential,
+// deliberately-throttled GDELT calls (~6s apart) on the ~once/day tick when
+// it fires — needs more headroom than the default function timeout.
+export const maxDuration = 120;
+
 // ── External data helpers (merged from fetch-external-data) ───
 
 async function isExternalDataStale(supabase: SupabaseClient): Promise<boolean> {
@@ -126,16 +131,60 @@ async function fetchArkHoldings(supabase: SupabaseClient) {
   } catch { /* non-fatal */ }
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function isNewsStale(supabase: SupabaseClient): Promise<boolean> {
+  const { data } = await supabase
+    .from("external_data_cache")
+    .select("fetched_at")
+    .eq("source", "news_sentiment")
+    .eq("key", "AAPL")
+    .single();
+  if (!data?.fetched_at) return true;
+  const ageHours = (Date.now() - new Date(data.fetched_at).getTime()) / 3_600_000;
+  return ageHours > 20;
+}
+
+// GDELT's free Doc 2.0 API — no key required, but self-throttles to roughly
+// one request per 5s (confirmed live: faster than that returns a rate-limit
+// message instead of data). Fetched sequentially with a deliberate delay
+// between symbols rather than in parallel, and gated to once per ~20h by
+// isNewsStale() above so this slow path only runs on one tick a day.
+async function fetchNewsSentiment(supabase: SupabaseClient) {
+  for (const [symbol, companyName] of Object.entries(NEWS_SYMBOL_NAMES)) {
+    try {
+      const url = `https://api.gdeltproject.org/api/v2/doc/doc?query=${encodeURIComponent(`"${companyName}"`)}&mode=timelinetone&timespan=1d&format=json`;
+      const r = await fetch(url, { headers: { "User-Agent": "TradecraftBotLab research@botlab.dev" } });
+      if (r.ok) {
+        const data = await r.json();
+        const points: { date: string; value: number }[] = data?.timeline?.[0]?.data ?? [];
+        // GDELT returns a 0 for every 15-min bucket with no matching coverage —
+        // only average the buckets that actually had articles, so quiet names
+        // don't get diluted to a meaningless near-zero score.
+        const covered = points.filter(p => p.value !== 0);
+        const avgTone = covered.length > 0 ? covered.reduce((s, p) => s + p.value, 0) / covered.length : 0;
+        await supabase.from("external_data_cache").upsert(
+          { source: "news_sentiment", key: symbol, payload: { symbol, avg_tone: avgTone, coverage_buckets: covered.length }, fetched_at: new Date().toISOString() },
+          { onConflict: "source,key" }
+        );
+      }
+    } catch { /* non-fatal, continue to next symbol */ }
+    await sleep(8000);
+  }
+}
+
 async function maybeRefreshExternalData(supabase: SupabaseClient): Promise<string> {
-  const stale = await isExternalDataStale(supabase);
-  if (!stale) return "external data fresh — skipped";
+  const stale     = await isExternalDataStale(supabase);
+  const newsStale = await isNewsStale(supabase);
+  const tasks: Promise<unknown>[] = [];
+  if (stale)     tasks.push(fetchCapitolTrades(supabase), fetchBerkshire(supabase), fetchArkHoldings(supabase));
+  if (newsStale) tasks.push(fetchNewsSentiment(supabase));
+  if (tasks.length === 0) return "external data fresh — skipped";
   // Run fetches in parallel, all non-fatal
-  await Promise.allSettled([
-    fetchCapitolTrades(supabase),
-    fetchBerkshire(supabase),
-    fetchArkHoldings(supabase),
-  ]);
-  return "external data refreshed";
+  await Promise.allSettled(tasks);
+  return `external data refreshed (institutional=${stale}, news=${newsStale})`;
 }
 
 // Group A
@@ -149,7 +198,7 @@ import { runD1, runD2, runD3, runD4 } from "@/bots/groupD";
 // Group E
 import { runE1, runE2, runE3, runE4, runE5, runE6 } from "@/bots/groupE";
 // Group F
-import { F_UNIVERSE, runF1, runF2, runF3, runF4, runF5, runF6, runF7, runF8, runF9, runF10, runF11, runF12, runF13, runF14, runF15 } from "@/bots/groupF";
+import { F_UNIVERSE, NEWS_SYMBOL_NAMES, runF1, runF2, runF3, runF4, runF5, runF6, runF7, runF8, runF9, runF10, runF11, runF12, runF13, runF14, runF15, runF16, runF17, runF18 } from "@/bots/groupF";
 // Group G
 import { runG1, runG2, runG3, runG4 } from "@/bots/groupG";
 // Super Bot
@@ -232,6 +281,9 @@ const BOT_RUNNERS: Record<string, {
   F13: { symbols: F_UNIVERSE, run: runF13 },
   F14: { symbols: F_UNIVERSE, run: runF14 },
   F15: { symbols: SECTOR_ETFS, run: runF15 },
+  F16: { symbols: Object.keys(NEWS_SYMBOL_NAMES), run: runF16 },
+  F17: { symbols: F_UNIVERSE, run: runF17 },
+  F18: { symbols: F_UNIVERSE, run: runF18 },
 
   // Group G
   G1:  { symbols: GROUP_A_ALL_SYMBOLS, run: runG1 },

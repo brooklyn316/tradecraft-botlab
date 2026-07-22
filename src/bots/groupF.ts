@@ -1,6 +1,7 @@
 // ============================================================
-// Group F — Pure Technical / Thematic Strategies (15 bots)
+// Group F — Pure Technical / Thematic Strategies (18 bots)
 // F1–F15: sector focus, technical signals, position styles
+// F16: news sentiment  F17/F18: 3-5-7 sizing / profit-taking rules
 // ============================================================
 
 import { BotContext, executeTrade, totalPortfolioValue } from "@/lib/botEngine";
@@ -407,5 +408,192 @@ export async function runF15(ctx: BotContext): Promise<string[]> {
     logs.push(`F15 buy ${best.symbol}: ${result.message}`);
   }
 
+  return logs;
+}
+
+// ── F16 — News Sentiment Bot ────────────────────────────────────
+// Buys the name with the clearest positive recent news tone, exits any
+// holding whose tone has turned clearly negative. Sentiment comes from
+// GDELT's free Average Tone score (roughly -10..+10 in practice; real
+// headline coverage, no API key required) — fetched and cached in
+// external_data_cache by /api/cron/run-bots (~once/day, see
+// fetchNewsSentiment there), never called directly from here.
+
+export const NEWS_SYMBOL_NAMES: Record<string, string> = {
+  AAPL:  "Apple Inc",
+  MSFT:  "Microsoft Corp",
+  GOOGL: "Google",
+  AMZN:  "Amazon.com",
+  TSLA:  "Tesla Inc",
+  NVDA:  "Nvidia Corp",
+  META:  "Meta Platforms",
+  JPM:   "JPMorgan Chase",
+  XOM:   "ExxonMobil",
+  DIS:   "Walt Disney Company",
+};
+
+interface NewsSentiment {
+  symbol: string;
+  avg_tone: number;
+  coverage_buckets: number;
+}
+
+export async function runF16(ctx: BotContext): Promise<string[]> {
+  const logs: string[] = [];
+  const { supabase, holdings, prices, portfolio } = ctx;
+  const symbols = Object.keys(NEWS_SYMBOL_NAMES);
+
+  const { data: rows } = await supabase
+    .from("external_data_cache")
+    .select("key, payload")
+    .eq("source", "news_sentiment")
+    .in("key", symbols);
+  const sentimentMap = new Map<string, NewsSentiment>(
+    (rows ?? []).map((r: { key: string; payload: NewsSentiment }) => [r.key, r.payload])
+  );
+
+  if (sentimentMap.size === 0) {
+    return ["F16: no news sentiment data in cache yet — skipping"];
+  }
+
+  // Exit anything whose news has turned clearly negative
+  for (const h of [...holdings]) {
+    const sentiment = sentimentMap.get(h.symbol);
+    if (sentiment && sentiment.coverage_buckets >= 2 && sentiment.avg_tone <= -2) {
+      const result = await executeTrade({ ctx, symbol: h.symbol, action: "sell", amount: "all", reason: `F16: news tone turned negative (${sentiment.avg_tone.toFixed(2)}) — exiting` });
+      logs.push(`F16 exit ${h.symbol}: ${result.message}`);
+    }
+  }
+
+  let best: { symbol: string; sentiment: NewsSentiment } | null = null;
+  for (const symbol of symbols) {
+    if (holdings.some(h => h.symbol === symbol)) continue;
+    const sentiment = sentimentMap.get(symbol);
+    if (!sentiment || sentiment.coverage_buckets < 2) continue;
+    if (sentiment.avg_tone >= 2 && (!best || sentiment.avg_tone > best.sentiment.avg_tone)) {
+      best = { symbol, sentiment };
+    }
+  }
+
+  if (!best) {
+    logs.push("F16: no symbol with clearly positive news tone right now");
+    return logs;
+  }
+  if (!prices.get(best.symbol)?.price) {
+    logs.push(`F16: ${best.symbol} has positive tone but no live price — skipping`);
+    return logs;
+  }
+  const spend = portfolio.cash_balance * 0.3;
+  if (spend < 1) { logs.push("F16: insufficient cash"); return logs; }
+  const result = await executeTrade({ ctx, symbol: best.symbol, action: "buy", amount: spend, reason: `F16: positive news tone (${best.sentiment.avg_tone.toFixed(2)}) — ${best.sentiment.coverage_buckets} recent mentions` });
+  logs.push(`F16 buy ${best.symbol}: ${result.message}`);
+  return logs;
+}
+
+// ── F17 — 3-5-7 Position Scaling ────────────────────────────────
+// Classic position-sizing discipline: a first entry risks 3% of portfolio;
+// a second tranche brings it to 5% if the trade is working; a third brings
+// it to a hard-capped 7% if it's still working. Never adds to a loser —
+// only pyramids into strength. This bot is about SIZING discipline, not
+// signal generation, so the entry/add filter is kept minimal: price above
+// its own 10-day average.
+
+const F17_TIERS = [0.03, 0.05, 0.07]; // cumulative % of portfolio
+
+export async function runF17(ctx: BotContext): Promise<string[]> {
+  const logs: string[] = [];
+  const { holdings, prices, portfolio, history } = ctx;
+
+  // Safety stop — the 3-5-7 rule is about sizing into winners, not about
+  // holding a loser indefinitely.
+  for (const h of [...holdings]) {
+    const priceRow = prices.get(h.symbol);
+    if (!priceRow?.price) continue;
+    const change = (priceRow.price - h.avg_cost) / h.avg_cost;
+    if (change <= -0.05) {
+      const result = await executeTrade({ ctx, symbol: h.symbol, action: "sell", amount: "all", reason: `F17: stop-loss at -5% — the trade stopped working, exit and reset` });
+      logs.push(`F17 stop ${h.symbol}: ${result.message}`);
+    }
+  }
+
+  const portfolioTotal = totalPortfolioValue(holdings, prices, portfolio.cash_balance);
+
+  for (const symbol of F_UNIVERSE) {
+    const hist     = history.get(symbol);
+    const priceRow = prices.get(symbol);
+    if (!hist || hist.length < 10 || !priceRow?.price) continue;
+    const avg10     = hist.slice(-10).reduce((s, d) => s + d.close, 0) / 10;
+    const inUptrend = priceRow.price > avg10;
+
+    const holding      = holdings.find(h => h.symbol === symbol);
+    const currentValue = (holding?.shares ?? 0) * priceRow.price;
+    const currentPct   = portfolioTotal > 0 ? currentValue / portfolioTotal : 0;
+    const unrealizedGain = holding ? (priceRow.price - holding.avg_cost) / holding.avg_cost : 0;
+
+    if (holding && unrealizedGain < 0) continue; // never pyramid into a loser
+    if (!inUptrend) continue;
+
+    const nextTier = F17_TIERS.find(t => t > currentPct + 0.001);
+    if (!nextTier) continue; // already at or above the 7% cap
+
+    const targetValue = portfolioTotal * nextTier;
+    const spend = Math.min(targetValue - currentValue, portfolio.cash_balance);
+    if (spend < 1) continue;
+
+    const result = await executeTrade({ ctx, symbol, action: "buy", amount: spend, reason: `F17: ${holding ? "adding to" : "opening"} position — scaling to ${(nextTier * 100).toFixed(0)}% tier (10-day uptrend)` });
+    logs.push(`F17 ${holding ? "add" : "open"} ${symbol}: ${result.message}`);
+    break; // one tranche action per tick
+  }
+
+  if (logs.length === 0) logs.push("F17: no qualifying uptrend entries this check");
+  return logs;
+}
+
+// ── F18 — 3-5-7 Profit Taking ───────────────────────────────────
+// Classic scale-out discipline: sell a third of the position at +3% gain,
+// half of what's left (≈another third of the original) at +5%, and the
+// remainder at +7% — banking profit in stages instead of all-or-nothing.
+// Needs to remember which tiers have already been taken per holding
+// (bot_holdings.profit_tier), since price sitting above +3% on every
+// subsequent tick would otherwise re-trigger the same partial sell forever.
+
+const F18_TIERS = [
+  { pct: 0.03, tier: 1, fraction: 1 / 3 },
+  { pct: 0.05, tier: 2, fraction: 0.5 },
+  { pct: 0.07, tier: 3, fraction: 1 },
+];
+
+export async function runF18(ctx: BotContext): Promise<string[]> {
+  const logs: string[] = [];
+  const { supabase, bot, holdings, prices, portfolio } = ctx;
+
+  for (const h of [...holdings]) {
+    const priceRow = prices.get(h.symbol);
+    if (!priceRow?.price) continue;
+    const gain = (priceRow.price - h.avg_cost) / h.avg_cost;
+    const next = F18_TIERS.find(t => t.tier > h.profit_tier && gain >= t.pct);
+    if (!next) continue;
+
+    const amount = next.fraction === 1 ? "all" : h.shares * next.fraction;
+    const result = await executeTrade({ ctx, symbol: h.symbol, action: "sell", amount, reason: `F18: +${(next.pct * 100).toFixed(0)}% tier reached — banking ${next.fraction === 1 ? "the rest" : `${(next.fraction * 100).toFixed(0)}% of the position`}` });
+    logs.push(`F18 tier${next.tier} ${h.symbol}: ${result.message}`);
+
+    if (result.success && next.fraction !== 1) {
+      await supabase.from("bot_holdings").update({ profit_tier: next.tier }).eq("bot_id", bot.id).eq("symbol", h.symbol);
+    }
+  }
+
+  for (const symbol of F_UNIVERSE) {
+    if (holdings.some(h => h.symbol === symbol)) continue;
+    const priceRow = prices.get(symbol);
+    if (!priceRow?.price || (priceRow.change_percent ?? 0) < 2) continue;
+    const spend = portfolio.cash_balance * 0.25;
+    if (spend < 1) continue;
+    const result = await executeTrade({ ctx, symbol, action: "buy", amount: spend, reason: `F18: entering on today's +${(priceRow.change_percent ?? 0).toFixed(1)}% move — will scale out at +3/+5/+7%` });
+    logs.push(`F18 buy ${symbol}: ${result.message}`);
+    break;
+  }
+
+  if (logs.length === 0) logs.push("F18: no tier exits or new entries this check");
   return logs;
 }
