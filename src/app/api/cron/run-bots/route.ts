@@ -74,8 +74,30 @@ async function fetchBerkshire(supabase: SupabaseClient) {
     const idx  = data.filings?.recent?.form?.findIndex((f: string) => f === "13F-HR");
     if (idx === undefined || idx === -1) return;
     const acc  = data.filings.recent.accessionNumber[idx].replace(/-/g, "");
-    const doc  = data.filings.recent.primaryDocument[idx];
-    const docR = await fetch(`https://www.sec.gov/Archives/edgar/data/1067983/${acc}/${doc}`, { headers: { "User-Agent": "TradecraftBotLab research@botlab.dev" } });
+
+    // A 13F filing's "primaryDocument" (primary_doc.xml) is the cover page —
+    // filer info and signature, no holdings. The actual per-security data
+    // lives in a *separate* XML file in the same accession folder, whose name
+    // isn't predictable in advance (confirmed live: Berkshire's latest filing
+    // has it at "53405.xml", not something derivable from the accession
+    // number). Discover it via the filing's own index.json instead of
+    // assuming a filename, and pick the largest non-primary_doc XML file —
+    // the real information table is always much bigger than the cover page.
+    let infoTableUrl = `https://www.sec.gov/Archives/edgar/data/1067983/${acc}/${data.filings.recent.primaryDocument[idx]}`;
+    try {
+      const idxR = await fetch(`https://www.sec.gov/Archives/edgar/data/1067983/${acc}/index.json`, { headers: { "User-Agent": "TradecraftBotLab research@botlab.dev" } });
+      if (idxR.ok) {
+        const idxData = await idxR.json();
+        const xmlFiles = (idxData.directory?.item ?? [])
+          .filter((it: any) => it.name?.toLowerCase().endsWith(".xml") && it.name.toLowerCase() !== "primary_doc.xml")
+          .sort((a: any, b: any) => parseInt(b.size ?? "0") - parseInt(a.size ?? "0"));
+        if (xmlFiles.length > 0) {
+          infoTableUrl = `https://www.sec.gov/Archives/edgar/data/1067983/${acc}/${xmlFiles[0].name}`;
+        }
+      }
+    } catch { /* fall back to primaryDocument above */ }
+
+    const docR = await fetch(infoTableUrl, { headers: { "User-Agent": "TradecraftBotLab research@botlab.dev" } });
     if (!docR.ok) return;
     const xml  = await docR.text();
     const CUSIP: Record<string, string> = { "037833100": "AAPL", "670346105": "OXY", "531229441": "KO", "713448108": "CVX", "929042109": "WFC" };

@@ -50,11 +50,28 @@ export async function runG1(ctx: BotContext): Promise<string[]> {
     return logs;
   }
 
-  const gappers = GROUP_A_ALL_SYMBOLS
+  // stock_prices only ever holds the latest snapshot (overwritten every
+  // tick), so there's no retained record of "what was the price relative to
+  // open at each historical check." Logging every candidate ≥2% gap here —
+  // qualifying or already-faded — is the only way to tell, after the fact,
+  // whether the window genuinely had no opportunity or one appeared and
+  // faded before a tick caught it still climbing.
+  const candidates = GROUP_A_ALL_SYMBOLS
     .map(s => prices.get(s))
     .filter((p): p is NonNullable<typeof p> => !!p?.open && !!p?.prev_close && p.prev_close > 0 && !!p.price)
     .map(p => ({ p, gapPct: (p.open! - p.prev_close!) / p.prev_close! }))
-    .filter(({ p, gapPct }) => gapPct >= 0.02 && p.price > p.open!) // real gap, still climbing above open
+    .filter(({ gapPct }) => gapPct >= 0.02); // any real gap, regardless of whether it's still climbing
+
+  for (const { p, gapPct } of candidates) {
+    const stillClimbing = p.price > p.open!;
+    logs.push(`G1 candidate ${p.symbol}: gapped ${(gapPct * 100).toFixed(1)}%, ${stillClimbing ? "still above open" : `faded back to $${p.price} vs open $${p.open}`}`);
+  }
+  if (candidates.length === 0) {
+    logs.push("G1: no symbol gapped ≥2% this check — no candidates");
+  }
+
+  const gappers = candidates
+    .filter(({ p }) => p.price > p.open!) // real gap, still climbing above open
     .sort((a, b) => b.gapPct - a.gapPct)
     .slice(0, 1); // one concentrated bet at a time
 
