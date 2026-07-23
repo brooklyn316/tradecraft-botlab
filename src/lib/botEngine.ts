@@ -125,19 +125,35 @@ export async function loadHistory(
   return map;
 }
 
+// Bounds a fetch to a hard wall-clock budget via AbortController. The
+// stock-prices edge function calls Yahoo per symbol server-side and has no
+// guaranteed upper bound of its own — confirmed live that on a slow day this
+// alone can consume run-bots' entire remaining time budget with nothing left
+// for the 61-bot trading loop, the exact same failure shape as the GDELT
+// news-fetch regression this same file's callers just got bitten by.
+async function fetchWithTimeout(url: string, opts: RequestInit, ms: number): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  try {
+    return await fetch(url, { ...opts, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Trigger the price-fetch edge function to refresh a batch of symbols */
 export async function refreshPrices(symbols: string[]): Promise<void> {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
   console.log(`[botEngine] refreshPrices: SUPABASE_URL=${supabaseUrl}`);
   const url = `${supabaseUrl}/functions/v1/stock-prices`;
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}`,
     },
     body: JSON.stringify({ symbols }),
-  });
+  }, 45_000);
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`stock-prices edge function error: ${res.status} ${body}`);
@@ -152,14 +168,14 @@ export async function refreshPrices(symbols: string[]): Promise<void> {
  */
 export async function refreshDailyHistory(symbols: string[]): Promise<void> {
   const url = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/stock-prices`;
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}`,
     },
     body: JSON.stringify({ symbols, interval: "1day" }),
-  });
+  }, 45_000);
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`stock-prices (1day) edge function error: ${res.status} ${body}`);

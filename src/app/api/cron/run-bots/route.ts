@@ -286,13 +286,21 @@ const BOT_RUNNERS: Record<string, {
   D3:  { symbols: ALL_SYMBOLS, run: runD3 },
   D4:  { symbols: ALL_SYMBOLS, run: runD4 },
 
-  // Group E (symbols loaded from cache)
-  E1:  { symbols: [], run: runE1 },
-  E2:  { symbols: [], run: runE2 },
-  E3:  { symbols: [], run: runE3 },
-  E4:  { symbols: [], run: runE4 },
-  E5:  { symbols: [], run: runE5 },
-  E6:  { symbols: [], run: runE6 },
+  // Group E — each bot's own symbols come from external_data_cache at
+  // runtime (Congress trades / 13F filings / ARK holdings), not a fixed
+  // list, but refreshPrices() (called once, before any bot runs) still
+  // needs a concrete symbol list up front to know what to fetch live quotes
+  // for. An empty list here meant prices.has(symbol) was always false for
+  // whatever these bots discovered from the cache — real data was flowing
+  // (confirmed live for E4/E6's Berkshire feed) but could never be acted on.
+  // ALL_SYMBOLS is Botlab's whole tradeable large-cap/ETF universe, so any
+  // real institutional holding that's actually tradeable here gets a price.
+  E1:  { symbols: ALL_SYMBOLS, run: runE1 },
+  E2:  { symbols: ALL_SYMBOLS, run: runE2 },
+  E3:  { symbols: ALL_SYMBOLS, run: runE3 },
+  E4:  { symbols: ALL_SYMBOLS, run: runE4 },
+  E5:  { symbols: ALL_SYMBOLS, run: runE5 },
+  E6:  { symbols: ALL_SYMBOLS, run: runE6 },
 
   // Group F
   F1:  { symbols: F_UNIVERSE, run: runF1 },

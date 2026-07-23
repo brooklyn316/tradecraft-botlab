@@ -118,6 +118,12 @@ async function callClaude(prompt: string): Promise<ClaudeResponse | null> {
     return null;
   }
 
+  // Same defensive timeout as botEngine's refreshPrices/refreshDailyHistory —
+  // any un-bounded external call in the run-bots hot path risks eating the
+  // whole 120s function budget and blocking every other bot's turn to trade.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20_000);
+
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -131,6 +137,7 @@ async function callClaude(prompt: string): Promise<ClaudeResponse | null> {
         max_tokens: 1024,
         messages:   [{ role: "user", content: prompt }],
       }),
+      signal: controller.signal,
     });
 
     if (!res.ok) {
@@ -153,6 +160,8 @@ async function callClaude(prompt: string): Promise<ClaudeResponse | null> {
   } catch (err) {
     console.error("S1: Claude call failed:", err);
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
