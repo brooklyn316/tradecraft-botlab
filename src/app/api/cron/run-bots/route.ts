@@ -358,30 +358,34 @@ export async function GET(req: Request) {
   const isCloseTime = isNearMarketClose();
   const results: Record<string, { logs: string[]; error?: string }> = {};
 
-  // Refresh external data if stale (once per day, non-blocking on failure)
-  const externalStatus = await maybeRefreshExternalData(supabase);
-  console.log("External data:", externalStatus);
-
   // Collect all symbols for batch price refresh
   const allSymbols = Array.from(new Set(
     Object.values(BOT_RUNNERS).flatMap(b => b.symbols)
   ));
 
+  // External data and daily-history refreshes are both already individually
+  // time-boxed, but running them sequentially BEFORE the bot loop still means
+  // their combined worst case (up to ~95s: 30s external + 45s daily history)
+  // eats almost the entire 120s function budget before a single bot gets a
+  // turn — confirmed live: only ~20 of 64 bots got to run on a tick that hit
+  // this combined worst case. Neither of these actually needs to finish
+  // before bots trade (external data / daily history are read from cache by
+  // whichever bots use them, on THEIR next run either way), so they're fired
+  // here without awaiting and only collected after the bot loop below — bots
+  // get priority, and these run concurrently with the loop instead of before
+  // it, so the wall-clock cost is max(bot loop, refreshes) instead of their sum.
+  const externalDataPromise  = maybeRefreshExternalData(supabase).catch(err => `error: ${(err as Error).message}`);
+  const dailyHistoryPromise  = isCloseTime
+    ? refreshDailyHistory(allSymbols).catch(err => console.error("Daily history refresh failed:", err))
+    : Promise.resolve();
+
+  // Live prices ARE needed by every bot this tick, so this one still blocks —
+  // but it's bounded to 45s (see refreshPrices' own AbortController) rather
+  // than being able to hang indefinitely.
   try {
     await refreshPrices(allSymbols);
   } catch (err) {
     console.error("Price refresh failed:", err);
-  }
-
-  // Daily bars only need refreshing once the day's bar is final, not on every
-  // 30-min tick — reuses the same isCloseTime window writeDailySnapshot() uses.
-  // Idempotent on (symbol, date), so firing on 2 consecutive ticks is harmless.
-  if (isCloseTime) {
-    try {
-      await refreshDailyHistory(allSymbols);
-    } catch (err) {
-      console.error("Daily history refresh failed:", err);
-    }
   }
 
   // Run each bot
@@ -408,6 +412,12 @@ export async function GET(req: Request) {
       results[code] = { logs: [], error: (err as Error).message };
     }
   }
+
+  // Bots have already had their turn above — now just let the background
+  // refreshes finish (they've been running concurrently since before the
+  // bot loop started) so their own upserts land before the function exits.
+  const [externalStatus] = await Promise.all([externalDataPromise, dailyHistoryPromise]);
+  console.log("External data:", externalStatus);
 
   return NextResponse.json({ ok: true, timestamp: new Date().toISOString(), results });
 }
